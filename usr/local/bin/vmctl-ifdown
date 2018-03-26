@@ -1,0 +1,48 @@
+#!/bin/bash
+
+WHOAMI=$(whoami)
+
+BR_NAME=$1
+TAP_NAME=$2
+
+if [ -z ${BR_NAME} ] || [ -z ${TAP_NAME} ]; then
+	echo "Usage: $0 <bridge> <interface>"
+	exit 1
+fi
+
+if ! ip link show ${TAP_NAME} >/dev/null 2>&1; then
+	echo Error deleting tap interface: ${TAP_NAME} does not exist.
+	exit 1
+fi
+
+#if ! brctl show ${BR_NAME} >/dev/null 2>&1; then
+#	echo Bridge ${BR_NAME} does not exist.
+#	exit 1
+#fi
+
+echo -n "Disconnecting ${TAP_NAME} from the bridge ${BR_NAME} ... "
+if ! ip link set dev ${TAP_NAME} nomaster; then
+	echo Failed
+#	exit 1
+else
+	echo OK
+fi
+
+echo -n "Putting tap interface ${TAP_NAME} down ... "
+if ! ip link set dev ${TAP_NAME} down; then
+	echo Failed
+#	exit 1
+else
+	echo OK
+fi
+
+echo -n "Deleting interface ${TAP_NAME} ... "
+if ! ip tuntap del dev ${TAP_NAME} mode tap; then
+	echo Failed
+	exit 1
+else
+	echo OK
+fi
+
+brctl show ${BR_NAME}
+exit 0

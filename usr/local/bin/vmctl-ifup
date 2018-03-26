@@ -1,0 +1,49 @@
+#!/bin/bash
+
+BR_NAME=$1
+TAP_NAME=$2
+
+if [ -z ${BR_NAME} ] || [ -z ${TAP_NAME} ]; then
+	echo "Usage: $0 <bridge> <interface>"
+	exit 1
+fi
+
+USER=$(whoami)
+
+if ! brctl show ${BR_NAME} >/dev/null 2>&1; then
+	echo Bridge ${BR_NAME} does not exits.
+	exit 1
+fi
+
+if ip link show ${TAP_NAME} >/dev/null 2>&1; then
+	echo Error adding tap interface. Does ${TAP_NAME} already exist?
+	exit 1
+fi
+
+echo -n "Creating tap interface ${TAP_NAME} ... "
+if ! ip tuntap add dev ${TAP_NAME} mode tap user ${USER}; then
+	echo Failed 
+	exit 1
+else
+	echo OK
+fi
+
+echo -n "Setting ${TAP_NAME} interface up ... "
+if ! ip link set dev ${TAP_NAME} up; then
+	echo Failed
+	exit 1
+else
+	echo OK
+fi
+
+echo -n "Plugging ${TAP_NAME} to the bridge ${BR_NAME} ... "
+if ! ip link set dev ${TAP_NAME} master ${BR_NAME}; then
+	echo Failed
+	exit 1
+else
+	echo OK
+fi
+
+brctl show ${BR_NAME}
+
+exit 0

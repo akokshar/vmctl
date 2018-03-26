@@ -1,0 +1,215 @@
+#!/bin/bash
+
+CMD=$1
+VM_NAME=$2
+
+if [ -z ${VM_NAME} ] || [ -z ${CMD} ]; then
+	echo "usage: $0 <start|stop|pause|resume|spice|monitor|create> <vm-name>"
+	exit 1
+fi
+
+SCRIPT_DIR=$(dirname $(readlink -f $0))
+source /etc/vmctl/config
+VM_DIR=${DATA_DIR}/${VM_NAME}
+PIDFILE=/run/vmctl-${VM_NAME}.pid
+
+function load_vm_config() {
+	if ! source ${VM_DIR}/${VM_NAME}.conf >/dev/null 2>&1; then
+		echo "'${VM_NAME}' does not exits."
+		return 1
+	fi
+	return 0
+}
+
+function ga_command() {
+	cmd=$1
+	echo ">"$cmd
+	echo $cmd | socat - UNIX-CONNECT:${GA_SOCK}
+	timeout=10
+	while [ $timeout -gt 0 ]; do
+		response=$(socat -T 0.5 - UNIX-CONNECT:${GA_SOCK})
+		if [ -n "$response" ]; then
+			echo "<"$response
+			return
+		fi
+		((timeout--))
+	done
+}
+
+function start_vm() {
+	echo $$ > ${PIDFILE}
+
+	# To have socket files be rw for whole group.
+	# this will alow spice client to work 
+	umask 0002
+
+	if ${SCRIPT_DIR}/vmctl-ifup ${BR_NAME} ${VM_NAME}; then
+		echo "Starting '${VM_NAME}' instance"
+
+		OPTS="-name ${VM_NAME} "
+		OPTS+="-enable-kvm  "
+		OPTS+="-machine type=pc,accel=kvm "
+		OPTS+="-cpu host " 
+		#OPTS+="-cpu qemu64,-kvmclock " # perhaps, this will disable nested virtualization
+		OPTS+="-rtc base=utc,clock=rt,driftfix=slew " # test. if still eats CPU after wakeup, try cpu option above.
+		OPTS+="-m ${MEM} "
+		OPTS+="-balloon virtio "
+
+		OPTS+="-net nic,model=virtio,macaddr=${MACADDR} "
+		OPTS+="-net tap,ifname=${VM_NAME},script=no,downscript=no "
+
+		for d in ${DRIVE}; do
+			OPTS+="-drive file=${d},if=virtio,aio=native,cache.direct=on,format=raw "
+		done
+		OPTS+="-boot c "
+
+		OPTS+="-device virtio-serial-pci,id=virtio-serial-pci0 "
+
+		OPTS+="-monitor unix:${MONITOR_SOCK},server,nowait "
+
+		OPTS+="-vga qxl "
+		OPTS+="-device virtserialport,chardev=spicechannel0,name=com.redhat.spice.0 "
+		OPTS+="-chardev spicevmc,id=spicechannel0,name=vdagent "
+		#OPTS+="-spice unix,addr=${SPICE_SOCK},disable-ticketing "
+		OPTS+="-spice addr=${SPICE_SOCK},unix,disable-ticketing "
+
+		#OPTS+="-chardev pipe,id=guestagent0,path=${GA_PIPE} "
+		OPTS+="-chardev socket,path=${GA_SOCK},server,nowait,id=guestagent0 "
+		OPTS+="-device virtserialport,chardev=guestagent0,name=org.qemu.guest_agent.0 "
+
+		echo "Starting with opts: "${OPTS}
+
+		if ! qemu-system-x86_64 ${OPTS}; then
+			echo Failed
+		fi
+	fi
+	
+	${SCRIPT_DIR}/vmctl-ifdown ${BR_NAME} ${VM_NAME}
+	rm ${PIDFILE}
+}
+
+function stop_vm() {
+	echo "Terminting '${VM_NAME}' instance."
+	# send cont signal in case machine was suspended
+	echo 'cont' | socat - UNIX-CONNECT:${MONITOR_SOCK}
+	echo 'system_powerdown' | socat - UNIX-CONNECT:${MONITOR_SOCK}
+	echo 
+	PID=$(cat ${PIDFILE} 2>/dev/null)
+	if [ ! -z $PID ]; then 
+		echo Waiting for PID=${PID} to terminate
+		tail --pid=$PID -f /dev/null
+	fi
+	echo "Instance '${VM_NAME}' has been erminated."
+}
+
+function pause_vm() {
+	echo "Pausing '${VM_NAME}' instance"
+	echo 'stop' | socat - UNIX-CONNECT:${MONITOR_SOCK}
+	echo
+}
+
+function resume_vm() {
+	echo "Resuming '${VM_NAME}' instance"
+	echo 'cont' | socat - UNIX-CONNECT:${MONITOR_SOCK}
+	echo
+	echo "Synchronizing vm time"
+	ga_command "{'execute':'guest-set-time'}"
+}
+
+function create_vm() {
+	if [ -d ${VM_DIR} ]; then
+		echo Already exist
+		exit 1
+	fi
+
+	# vmname is also used for tun/tap interface 
+	# net/if.h defines IFNETSIZ=16, including NULL character.
+	# tun/tap interface creation will fail if name longer then 16
+	if [ ${#VM_NAME} -ge 16 ]; then
+		echo "Name must be less then 16 characters"
+		exit 1
+	fi
+
+	TEMPLATE=$1
+	if [ -z ${TEMPLATE} ]; then
+		TEMPLATE=${LVM_VM_TEMPLATE}
+	fi
+
+	echo -n "Creating lvm volume for ${VM_NAME} using ${TEMPLATE} ... "
+	if ! lvcreate --snapshot --name ${VM_NAME} ${TEMPLATE}; then
+		echo Failed
+		exit 1
+	else
+		lvchange -kn ${LVM_VG}/${VM_NAME}
+		lvchange -ay ${LVM_VG}/${VM_NAME}
+		echo OK
+	fi
+
+	echo -n "Creating default config file for ${VM_NAME} ... "
+
+	mkdir ${VM_DIR}
+
+	local MAC_CNTR=$(( $(cat ${DATA_DIR}/mac) + 1 ))
+	echo -n ${MAC_CNTR} > ${DATA_DIR}/mac
+	local MAC_ADDR="52:54:00:$(printf %0.6X ${MAC_CNTR} | sed -e 's/../&:/g' -e 's/:$//')"
+
+	cat <<CONFIG > ${VM_DIR}/${VM_NAME}.conf
+MEM=1024
+DRIVE=/dev/${LVM_VG}/${VM_NAME}
+MACADDR=${MAC_ADDR}
+SPICE_SOCK=${VM_DIR}/${VM_NAME}-spice.sock
+MONITOR_SOCK=${VM_DIR}/${VM_NAME}-monitor.sock
+GA_SOCK=${VM_DIR}/${VM_NAME}-ga.sock
+CONFIG
+	
+	echo OK 
+	
+	echo MAC: ${MAC_ADDR}
+}
+
+function remove_vm() {
+	echo -n "Removing ${VM_NAME} ... "
+	stop_vm ${vm_NAME}
+	if lvremove ${DRIVE}; then
+		rm -rf ${VM_DIR}
+		echo OK
+	else
+		echo Failed
+	fi
+}
+
+#function list_vm() {
+#}
+
+
+load_vm_config
+
+case $CMD in
+	start)
+		start_vm
+		;;
+	stop)
+		stop_vm
+		;;
+	pause)
+		pause_vm
+		;;
+	resume)
+		resume_vm
+		;;
+	spice)
+		spicy --uri="spice+unix://${SPICE_SOCK}"
+		;;
+	monitor)
+		socat - UNIX-CONNECT:${MONITOR_SOCK}
+		;;
+	create)
+		create_vm $3
+		;;
+	remove)
+		remove_vm
+		;;
+esac
+
+
+exit 0

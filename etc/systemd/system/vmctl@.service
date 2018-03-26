@@ -1,0 +1,15 @@
+[Unit]
+Description=QEMU virtual machine %i
+RequiresMountsFor=/var/lib/qemu-vm/
+
+[Service]
+User=root
+Group=kvm
+PIDFile=/run/qemu-vm-%i.pid
+ExecStart=/usr/local/bin/vmctl start %i
+ExecStop=/usr/local/bin/vmctl stop %i
+#TimeoutStopSec=30
+KillMode=none
+
+[Install]
+WantedBy=multi-user.target

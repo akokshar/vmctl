@@ -1,0 +1,13 @@
+[Unit]
+Description=Networking for my infra
+After=network-pre.target
+Before=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/etc/systemd/scripts/lex-network.sh start
+ExecStop=/etc/systemd/scripts/lex-network.sh stop
+
+[Install]
+WantedBy=network.target

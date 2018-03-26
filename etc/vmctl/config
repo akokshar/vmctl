@@ -1,0 +1,9 @@
+BR_NAME=qemu0
+DATA_DIR=/var/lib/qemu
+
+LVM_VG=vg0
+LVM_POOL=vg0/vmpool
+LVM_VM_TEMPLATE=vg0/template.fedora26
+
+# lvcreate -L 32G -T thin_vg/mythinpool
+# lvcreate -V 10G -T thin_vg/mythinpool -n thinvolume
